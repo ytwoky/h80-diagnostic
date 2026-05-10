@@ -1,0 +1,39 @@
+# Артефакты сборки
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.spec.bak
+
+# Генерируемые иконки (создаются в CI из mgtu_logo.png)
+mgtu_logo.icns
+mgtu_logo.ico
+
+# Базы данных (тестовые / история)
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# Python
+.env
+venv/
+env/
+.venv/
+*.egg-info/

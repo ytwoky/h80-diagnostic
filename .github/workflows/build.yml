@@ -1,0 +1,144 @@
+name: Build H80 Diagnostic
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  # ──────────────────────────────────────────
+  # macOS — Apple Silicon (arm64)
+  # ──────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install matplotlib numpy scipy pillow pyinstaller --quiet
+
+      - name: Create .icns icon
+        run: |
+          mkdir -p /tmp/AppIcon.iconset
+          for s in 16 32 64 128 256 512 1024; do
+            sips -z $s $s mgtu_logo.png --out /tmp/AppIcon.iconset/icon_${s}x${s}.png >/dev/null
+          done
+          cp /tmp/AppIcon.iconset/icon_32x32.png    /tmp/AppIcon.iconset/icon_16x16@2x.png
+          cp /tmp/AppIcon.iconset/icon_64x64.png    /tmp/AppIcon.iconset/icon_32x32@2x.png
+          cp /tmp/AppIcon.iconset/icon_256x256.png  /tmp/AppIcon.iconset/icon_128x128@2x.png
+          cp /tmp/AppIcon.iconset/icon_512x512.png  /tmp/AppIcon.iconset/icon_256x256@2x.png
+          cp /tmp/AppIcon.iconset/icon_1024x1024.png /tmp/AppIcon.iconset/icon_512x512@2x.png
+          iconutil -c icns /tmp/AppIcon.iconset -o mgtu_logo.icns
+
+      - name: Build .app
+        run: pyinstaller h80_diagnostic.spec --clean --noconfirm
+
+      - name: Package ZIP
+        run: |
+          cd dist
+          zip -r --symlinks "H80_Diagnostic_macOS_arm64.zip" "H80 Diagnostic.app"
+          echo "Size: $(du -sh 'H80_Diagnostic_macOS_arm64.zip' | cut -f1)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: H80-Diagnostic-macOS
+          path: dist/H80_Diagnostic_macOS_arm64.zip
+          retention-days: 30
+
+  # ──────────────────────────────────────────
+  # Windows — x64
+  # ──────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install matplotlib numpy scipy pillow pyinstaller --quiet
+
+      - name: Create .ico icon
+        run: |
+          python -c "
+          from PIL import Image
+          img = Image.open('mgtu_logo.png').convert('RGBA')
+          img.save('mgtu_logo.ico', format='ICO',
+                   sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])
+          print('ICO created')
+          "
+
+      - name: Build .exe
+        run: pyinstaller h80_diagnostic.spec --clean --noconfirm
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\H80 Diagnostic" -DestinationPath "dist\H80_Diagnostic_Windows_x64.zip"
+          Write-Host "Size: $([math]::Round((Get-Item 'dist\H80_Diagnostic_Windows_x64.zip').Length/1MB, 1)) MB"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: H80-Diagnostic-Windows
+          path: dist\H80_Diagnostic_Windows_x64.zip
+          retention-days: 30
+
+  # ──────────────────────────────────────────
+  # GitHub Release — только на тег v*
+  # ──────────────────────────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: H80-Diagnostic-macOS
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: H80-Diagnostic-Windows
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "H80 Diagnostic ${{ github.ref_name }}"
+          body: |
+            ## GE H80-200 Diagnostic Tool — ${{ github.ref_name }}
+
+            ### Скачать
+            | Платформа | Файл |
+            |-----------|------|
+            | macOS (Apple Silicon) | `H80_Diagnostic_macOS_arm64.zip` |
+            | Windows (x64) | `H80_Diagnostic_Windows_x64.zip` |
+
+            ### macOS
+            После распаковки: **ПКМ → Открыть** (или `xattr -rd com.apple.quarantine "H80 Diagnostic.app"`)
+
+            ### Windows
+            Запустить `H80 Diagnostic.exe` из папки `H80 Diagnostic\`
+          files: |
+            H80_Diagnostic_macOS_arm64.zip
+            H80_Diagnostic_Windows_x64.zip
+          generate_release_notes: false
