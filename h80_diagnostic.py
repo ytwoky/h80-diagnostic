@@ -47,7 +47,7 @@ LOGO_PATH = os.path.join(SCRIPT_DIR, "mgtu_logo.png")
 RA_REFERENCE = 5.0
 RA_LIMIT_WARN = 50.0
 RA_LIMIT_CRIT = 85.0
-ZETA_LIMIT = 0.0680
+ZETA_LIMIT_FACTOR = 1.10  # порог ζ = эталонное ζ (при ref_ra) × коэффициент
 
 STD_PRESSURE_KPA = 101.325
 STD_TEMP_K = 288.15
@@ -287,6 +287,9 @@ class CfdModel:
         self._build_interpolators()
         self._build_reference()
         self._build_ranges()
+        self.zeta_limit: float | None = (
+            self.ref_params["P7"] * ZETA_LIMIT_FACTOR if "P7" in self.ref_params else None
+        )
 
     @staticmethod
     def _deduplicate(points: list[dict[str, float | str]]) -> list[dict[str, float | str]]:
@@ -374,11 +377,11 @@ class CfdModel:
         return 0.60 * di_power + 0.40 * di_aero
 
     def estimate_ra_threshold(self) -> float | None:
-        if "P7" not in self.interp:
+        if "P7" not in self.interp or self.zeta_limit is None:
             return None
         for ra in np.linspace(self.ra_min, self.ra_max, 500):
             zeta = self.value("P7", float(ra))
-            if zeta is not None and zeta > ZETA_LIMIT:
+            if zeta is not None and zeta > self.zeta_limit:
                 return float(ra)
         return None
 
@@ -702,16 +705,20 @@ class DiagnosticApp:
         info = tk.Frame(sidebar, bg=C.BG_SIDEBAR)
         info.pack(side=tk.BOTTOM, fill=tk.X, padx=28, pady=18)
         tk.Label(info, text="ПОРОГИ ДИАГНОСТИКИ", font=("Segoe UI", 8, "bold"), bg=C.BG_SIDEBAR, fg=C.TEXT_SB_DIM).pack(anchor=tk.W)
+        self.zeta_threshold_lbl: tk.Label | None = None
         for text, color in [
             (f"Эталон Ra = {RA_REFERENCE:g} мкм", C.SUCCESS),
             (f"Предупреждение > {RA_LIMIT_WARN:g} мкм", C.WARNING),
             (f"Критический > {RA_LIMIT_CRIT:g} мкм", C.DANGER),
-            (f"Предел ζ = {ZETA_LIMIT}", C.INFO),
+            (f"Предел ζ = ζ_эт × {ZETA_LIMIT_FACTOR:g}", C.INFO),
         ]:
             row = tk.Frame(info, bg=C.BG_SIDEBAR)
             row.pack(anchor=tk.W, pady=2)
             tk.Label(row, text="●", fg=color, bg=C.BG_SIDEBAR, font=("Segoe UI", 10)).pack(side=tk.LEFT)
-            tk.Label(row, text=" " + text, fg=C.TEXT_SB, bg=C.BG_SIDEBAR, font=("Segoe UI", 9)).pack(side=tk.LEFT)
+            lbl = tk.Label(row, text=" " + text, fg=C.TEXT_SB, bg=C.BG_SIDEBAR, font=("Segoe UI", 9))
+            lbl.pack(side=tk.LEFT)
+            if text.startswith("Предел ζ"):
+                self.zeta_threshold_lbl = lbl
 
     def _sidebar_field(
         self,
@@ -992,7 +999,7 @@ class DiagnosticApp:
                 f"Эталон Ra: {RA_REFERENCE:g} мкм\n"
                 f"Предупреждение: Ra > {RA_LIMIT_WARN:g} мкм\n"
                 f"Критический уровень: Ra > {RA_LIMIT_CRIT:g} мкм\n"
-                f"Предел zeta: {ZETA_LIMIT}",
+                f"Предел zeta: эталонное ζ (при ref Ra) × {ZETA_LIMIT_FACTOR:g}",
             ),
         ]:
             card = Card(outer)
@@ -1091,6 +1098,10 @@ class DiagnosticApp:
             text=f"Ra: {self.model.ra_min:.1f}–{self.model.ra_max:.1f} мкм; эталон: {self.model.ref_ra:.1f} мкм"
         )
         self.data_count_lbl.configure(text=f"— всего {len(self.model.points)} точек")
+        if self.zeta_threshold_lbl is not None and self.model.zeta_limit is not None:
+            self.zeta_threshold_lbl.configure(
+                text=f" Предел ζ = {self.model.zeta_limit:.4f} (эт.×{ZETA_LIMIT_FACTOR:g})"
+            )
 
     def _update_table(self) -> None:
         if self.model is None:
@@ -1218,8 +1229,8 @@ class DiagnosticApp:
             ax.plot(ra_fine, fine, color=color, linewidth=2.2, alpha=0.9, label="Интерполяция")
             ax.scatter(ra, raw, color=color, s=42, zorder=5, edgecolors="white", linewidths=1.3, label="ANSYS CFD")
             ax.axvline(self.model.ref_ra, color=C.SUCCESS, linewidth=1.0, linestyle=":", alpha=0.9, label=f"Эталон Ra={self.model.ref_ra:g}")
-            if code == "P7":
-                ax.axhline(ZETA_LIMIT, color=C.DANGER, linewidth=1.2, linestyle="--", alpha=0.8, label=f"zeta-предел = {ZETA_LIMIT}")
+            if code == "P7" and self.model.zeta_limit is not None:
+                ax.axhline(self.model.zeta_limit, color=C.DANGER, linewidth=1.2, linestyle="--", alpha=0.8, label=f"ζ-предел = {self.model.zeta_limit:.4f}")
             ax.axvspan(RA_LIMIT_WARN, RA_LIMIT_CRIT, color=C.WARNING, alpha=0.07)
             ax.axvspan(RA_LIMIT_CRIT, max(ra.max() * 1.1, RA_LIMIT_CRIT + 1), color=C.DANGER, alpha=0.07)
 
@@ -1383,6 +1394,7 @@ class DiagnosticApp:
                 "",
                 "  СИГНАЛ B: АЭРОДИНАМИКА ЛОПАТКИ",
                 f"    Delta zeta            : {result.zeta_deg:+.2f}%",
+                f"    zeta-предел (эт.×{ZETA_LIMIT_FACTOR:g}) : {result.zeta_ref * ZETA_LIMIT_FACTOR:.4f}",
                 f"    Delta расхода         : {result.flow_loss:+.3f}%",
                 f"    DI                    : {result.di:.1f}%",
             ]
@@ -1451,7 +1463,8 @@ class DiagnosticApp:
             if fuel_price < 0 or flow_ref <= 0 or annual_hours <= 0 or cost_mro < 0 or cost_wash < 0 or rate <= -1 or horizon < 1:
                 raise ValueError("Экономические параметры должны быть положительными; ставка должна быть больше -100%.")
         except ValueError as exc:
-            messagebox.showerror("Ошибка экономики", str(exc))
+            if not silent:
+                messagebox.showerror("Ошибка экономики", str(exc))
             return
 
         result = self.last
@@ -1464,22 +1477,25 @@ class DiagnosticApp:
         extra_fuel_year = extra_fuel_h * annual_hours
         extra_cost_year = extra_fuel_year * fuel_price
         wash_eff = 0.55
-        wash_cycles_year = 2.0
+        # 1 промывка сейчас (учтена как инвестиция cost_wash в год 0) + 1 промывка в год далее
+        wash_cycles_year = 1.0
         wash_annual_cost = wash_cycles_year * cost_wash + extra_cost_year * (1.0 - wash_eff)
 
         years = np.arange(0, horizon + 1)
 
-        def npv_series(annual_cost: float, invest: float) -> np.ndarray:
+        # Формула учебника: NPV = -K + Σ(CF_j / (1+i)^j), где CF_j — экономия в год j
+        def npv_series(annual_savings: float, invest: float) -> np.ndarray:
             acc = -invest
             values = [-invest]
             for year in range(1, horizon + 1):
-                acc -= annual_cost / (1 + rate) ** year
+                acc += annual_savings / (1 + rate) ** year
                 values.append(acc)
             return np.array(values)
 
-        npv_status_quo = npv_series(extra_cost_year, 0.0)
-        npv_wash = npv_series(wash_annual_cost, cost_wash)
-        npv_mro = npv_series(0.0, cost_mro)
+        wash_savings_year = extra_cost_year - wash_annual_cost
+        npv_status_quo = npv_series(0.0, 0.0)                        # базовая линия
+        npv_wash = npv_series(wash_savings_year, cost_wash)
+        npv_mro = npv_series(extra_cost_year, cost_mro)
 
         payback_mro = self._payback_year(extra_cost_year, cost_mro, rate, horizon)
         payback_wash = self._payback_year(extra_cost_year - wash_annual_cost, cost_wash, rate, horizon)
@@ -1508,15 +1524,15 @@ class DiagnosticApp:
         )
 
         scenarios = [
-            ("Status Quo", 0.0, extra_cost_year, npv_status_quo[-1], "-"),
-            ("Промывка ПЧ", cost_wash, wash_annual_cost, npv_wash[-1], f"{payback_wash} лет" if payback_wash else f"> {horizon} лет"),
-            ("Полный ремонт MRO", cost_mro, 0.0, npv_mro[-1], f"{payback_mro} лет" if payback_mro else f"> {horizon} лет"),
+            ("Status Quo", 0.0, 0.0, npv_status_quo[-1], "-"),
+            ("Промывка ПЧ", cost_wash, wash_savings_year, npv_wash[-1], f"{payback_wash} лет" if payback_wash else f"> {horizon} лет"),
+            ("Полный ремонт MRO", cost_mro, extra_cost_year, npv_mro[-1], f"{payback_mro} лет" if payback_mro else f"> {horizon} лет"),
         ]
         best = max(item[3] for item in scenarios)
 
         tbl = tk.Frame(self.econ_result_frame, bg=C.BG_CARD)
         tbl.pack(fill=tk.X, pady=(0, 4))
-        col_headers = ["Сценарий", "Инвестиции, руб", "Ежегодно, руб", "NPV, руб", "Окупаемость"]
+        col_headers = ["Сценарий", "Инвестиции, руб", "Экономия/год, руб", "NPV, руб", "Окупаемость"]
         for j, h in enumerate(col_headers):
             tk.Label(
                 tbl, text=h, font=("Segoe UI", 8, "bold"),
@@ -1542,7 +1558,7 @@ class DiagnosticApp:
             child.destroy()
 
         fig = Figure(figsize=(12, 3.6), dpi=95, facecolor=C.BG_CARD)
-        fig.suptitle(f"NPV — накопленные дисконтированные затраты (r = {rate * 100:.0f}%)", fontsize=10, fontweight="bold", color=C.TEXT_DARK)
+        fig.suptitle(f"NPV = −K + Σ CF_j/(1+r)^j   —   чистая дисконтированная стоимость (r = {rate * 100:.0f}%)", fontsize=10, fontweight="bold", color=C.TEXT_DARK)
         self.fig_econ = fig
         ax = fig.add_subplot(111)
         fig.subplots_adjust(left=0.09, right=0.97, top=0.82, bottom=0.14)
@@ -1551,7 +1567,7 @@ class DiagnosticApp:
         ax.plot(years, npv_mro / 1e6, color=C.SUCCESS, linewidth=2.2, marker="^", markersize=4, label="MRO")
         ax.axhline(0, color=C.BORDER_DK, linewidth=0.8, linestyle="--")
         ax.set_xlabel("Год")
-        ax.set_ylabel("Млн руб. (затраты)")
+        ax.set_ylabel("NPV, млн руб.")
         ax.legend(loc="lower left", fontsize=8)
         ax.grid(True, alpha=0.4)
 
