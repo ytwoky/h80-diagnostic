@@ -1,6 +1,8 @@
 # Артефакты сборки
 build/
 dist/
+H80_Pyhon/
+*.zip
 __pycache__/
 *.pyc
 *.pyo
